@@ -232,6 +232,7 @@ def stream_until_done(api_key, task_id, payload=None, max_wait=900):
         str(preview_path) if preview_path else None,
     )
     if full_model_path:
+        time.sleep(3)
         record["cached_model_path"] = str(full_model_path)
         record["model_cache_state"] = "full"
         upsert_task(record)
@@ -380,7 +381,7 @@ def cache_task_preview(record):
 
 def proxy_model_path(task_id, full_model_path=None):
     task_id = short_id(task_id or "proxy")
-    path = PROXY_CACHE_DIR / f"{task_id}.glb"
+    path = PROXY_CACHE_DIR / f"{task_id}.obj"
     if not path.exists():
         if full_model_path and trimesh is not None:
             try:
@@ -402,8 +403,7 @@ def proxy_model_path(task_id, full_model_path=None):
 
 def fallback_proxy(path):
     path = Path(path)
-    obj_path = path.with_suffix(".obj")
-    obj_path.write_text(
+    path.write_text(
         "\n".join([
             "o proxy",
             "v -0.5 -0.5 -0.5",
@@ -429,15 +429,7 @@ def fallback_proxy(path):
         ]),
         encoding="utf-8",
     )
-    if trimesh is not None:
-        try:
-            mesh = trimesh.load(str(obj_path), force="mesh", process=False)
-            mesh.export(path)
-            obj_path.unlink(missing_ok=True)
-            return path
-        except Exception:
-            pass
-    return obj_path
+    return path
 
 
 def cache_url(url, kind, task_id=""):
