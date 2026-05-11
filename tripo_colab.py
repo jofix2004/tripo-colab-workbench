@@ -512,98 +512,109 @@ def split_csv(value):
 
 def build_app():
     ensure_dirs()
-    with gr.Blocks(title="Tripo API Workbench Colab") as app:
+    css = """
+    .preview-col { order: 2; }
+    .controls-col { order: 1; }
+    #preview-model { min-height: 720px !important; }
+    #preview-image { min-height: 220px !important; }
+    #raw-json pre, #raw-json textarea { max-height: 180px !important; font-size: 11px !important; }
+    #history-box table { font-size: 11px !important; }
+    """
+    with gr.Blocks(title="Tripo API Workbench Colab", css=css) as app:
         gr.Markdown("## Tripo API Workbench - Colab\nTexture/PBR off by default. History/cache in `/content/tripo_colab` unless `TRIPO_COLAB_HOME` is set.")
-        api_key = gr.Textbox(label="API key", type="password", placeholder="tsk_...")
-        history_table = gr.Dataframe(
-            headers=["task_id", "type", "status", "progress", "credits", "model_url", "cached_model_path"],
-            value=render_history(),
-            label="History",
-        )
-
         with gr.Row():
-            status = gr.Textbox(label="Task status", lines=9)
-            model = gr.Model3D(label="3D preview")
-            preview = gr.Image(label="Preview image", type="filepath")
-        raw = gr.Code(label="Raw task JSON", language="json")
+            with gr.Column(scale=3, min_width=620, elem_id="preview-col", elem_classes=["preview-col"]):
+                model = gr.Model3D(label="3D preview", elem_id="preview-model")
+                preview = gr.Image(label="Preview image", type="filepath", elem_id="preview-image")
+                with gr.Accordion("Raw task JSON", open=False):
+                    raw = gr.Code(label="Raw task JSON", language="json", elem_id="raw-json")
+                with gr.Accordion("History", open=False):
+                    history_table = gr.Dataframe(
+                        headers=["task_id", "type", "status", "progress", "credits", "model_url", "cached_model_path"],
+                        value=render_history(),
+                        label="History",
+                        elem_id="history-box",
+                    )
+            with gr.Column(scale=2, min_width=520, elem_id="controls-col", elem_classes=["controls-col"]):
+                api_key = gr.Textbox(label="API key", type="password", placeholder="tsk_...")
+                status = gr.Textbox(label="Task status", lines=8)
+                with gr.Tabs():
+                    with gr.Tab("Image to model"):
+                        image = gr.File(label="Image", file_types=["image"])
+                        with gr.Row():
+                            version = gr.Dropdown(["v3.1-20260211", "P1-20260311", "Turbo-v1.0-20250506", "v3.0-20250812", "v2.5-20250123", "v2.0-20240919"], value="v3.1-20260211", label="Model version")
+                            face = gr.Number(label="Face limit", precision=0)
+                        with gr.Row():
+                            autofix = gr.Checkbox(label="Image autofix")
+                            smart = gr.Checkbox(label="Smart mesh")
+                            quad = gr.Checkbox(label="Quad mesh")
+                        with gr.Row():
+                            geo = gr.Dropdown(["standard", "detailed"], value="standard", label="Geometry quality")
+                            seed = gr.Number(label="Model seed", precision=0)
+                        run = gr.Button("Run image_to_model", variant="primary")
+                        run.click(run_image_to_model, [api_key, image, version, face, autofix, smart, quad, geo, seed], [status, model, preview, raw, history_table])
 
-        with gr.Tabs():
-            with gr.Tab("Image to model"):
-                image = gr.File(label="Image", file_types=["image"])
-                with gr.Row():
-                    version = gr.Dropdown(["v3.1-20260211", "P1-20260311", "Turbo-v1.0-20250506", "v3.0-20250812", "v2.5-20250123", "v2.0-20240919"], value="v3.1-20260211", label="Model version")
-                    face = gr.Number(label="Face limit", precision=0)
-                with gr.Row():
-                    autofix = gr.Checkbox(label="Image autofix")
-                    smart = gr.Checkbox(label="Smart mesh")
-                    quad = gr.Checkbox(label="Quad mesh")
-                with gr.Row():
-                    geo = gr.Dropdown(["standard", "detailed"], value="standard", label="Geometry quality")
-                    seed = gr.Number(label="Model seed", precision=0)
-                run = gr.Button("Run image_to_model", variant="primary")
-                run.click(run_image_to_model, [api_key, image, version, face, autofix, smart, quad, geo, seed], [status, model, preview, raw, history_table])
+                    with gr.Tab("Multiview to model"):
+                        original = gr.Textbox(label="Original multiview task id")
+                        with gr.Row():
+                            front = gr.File(label="Front", file_types=["image"])
+                            left = gr.File(label="Left", file_types=["image"])
+                            back = gr.File(label="Back", file_types=["image"])
+                            right = gr.File(label="Right", file_types=["image"])
+                        with gr.Row():
+                            mv_version = gr.Dropdown(["v3.1-20260211", "P1-20260311", "v3.0-20250812", "v2.5-20250123", "v2.0-20240919"], value="v3.1-20260211", label="Model version")
+                            mv_face = gr.Number(label="Face limit", precision=0)
+                        with gr.Row():
+                            mv_autofix = gr.Checkbox(label="Image autofix")
+                            mv_smart = gr.Checkbox(label="Smart mesh")
+                            mv_quad = gr.Checkbox(label="Quad mesh")
+                        with gr.Row():
+                            mv_geo = gr.Dropdown(["standard", "detailed"], value="standard", label="Geometry quality")
+                            mv_seed = gr.Number(label="Model seed", precision=0)
+                        run = gr.Button("Run multiview_to_model", variant="primary")
+                        run.click(run_multiview_to_model, [api_key, original, front, left, back, right, mv_version, mv_face, mv_autofix, mv_smart, mv_quad, mv_geo, mv_seed], [status, model, preview, raw, history_table])
 
-            with gr.Tab("Multiview to model"):
-                original = gr.Textbox(label="Original multiview task id")
-                with gr.Row():
-                    front = gr.File(label="Front", file_types=["image"])
-                    left = gr.File(label="Left", file_types=["image"])
-                    back = gr.File(label="Back", file_types=["image"])
-                    right = gr.File(label="Right", file_types=["image"])
-                with gr.Row():
-                    mv_version = gr.Dropdown(["v3.1-20260211", "P1-20260311", "v3.0-20250812", "v2.5-20250123", "v2.0-20240919"], value="v3.1-20260211", label="Model version")
-                    mv_face = gr.Number(label="Face limit", precision=0)
-                with gr.Row():
-                    mv_autofix = gr.Checkbox(label="Image autofix")
-                    mv_smart = gr.Checkbox(label="Smart mesh")
-                    mv_quad = gr.Checkbox(label="Quad mesh")
-                with gr.Row():
-                    mv_geo = gr.Dropdown(["standard", "detailed"], value="standard", label="Geometry quality")
-                    mv_seed = gr.Number(label="Model seed", precision=0)
-                run = gr.Button("Run multiview_to_model", variant="primary")
-                run.click(run_multiview_to_model, [api_key, original, front, left, back, right, mv_version, mv_face, mv_autofix, mv_smart, mv_quad, mv_geo, mv_seed], [status, model, preview, raw, history_table])
+                    with gr.Tab("Import model"):
+                        model_file = gr.File(label="Model", file_types=[".glb", ".obj", ".fbx", ".stl"])
+                        run = gr.Button("Run import_model", variant="primary")
+                        run.click(run_import_model, [api_key, model_file], [status, model, preview, raw, history_table])
 
-            with gr.Tab("Import model"):
-                model_file = gr.File(label="Model", file_types=[".glb", ".obj", ".fbx", ".stl"])
-                run = gr.Button("Run import_model", variant="primary")
-                run.click(run_import_model, [api_key, model_file], [status, model, preview, raw, history_table])
+                    with gr.Tab("Smart low poly"):
+                        low_id = gr.Textbox(label="Original model task id")
+                        with gr.Row():
+                            low_version = gr.Dropdown(["P-v2.0-20251226", "P-v2.0-20251225", "v1.0-20250506"], value="P-v2.0-20251226", label="Model version")
+                            low_face = gr.Slider(500, 20000, value=20000, step=1, label="Face limit")
+                        with gr.Row():
+                            low_quad = gr.Checkbox(label="Quad mesh")
+                            low_bake = gr.Checkbox(label="Bake", value=True)
+                        low_parts = gr.Textbox(label="Part names")
+                        run = gr.Button("Run smart low poly", variant="primary")
+                        run.click(run_lowpoly, [api_key, low_id, low_version, low_face, low_quad, low_bake, low_parts], [status, model, preview, raw, history_table])
 
-            with gr.Tab("Smart low poly"):
-                low_id = gr.Textbox(label="Original model task id")
-                with gr.Row():
-                    low_version = gr.Dropdown(["P-v2.0-20251226", "P-v2.0-20251225", "v1.0-20250506"], value="P-v2.0-20251226", label="Model version")
-                    low_face = gr.Slider(500, 20000, value=20000, step=1, label="Face limit")
-                with gr.Row():
-                    low_quad = gr.Checkbox(label="Quad mesh")
-                    low_bake = gr.Checkbox(label="Bake", value=True)
-                low_parts = gr.Textbox(label="Part names")
-                run = gr.Button("Run smart low poly", variant="primary")
-                run.click(run_lowpoly, [api_key, low_id, low_version, low_face, low_quad, low_bake, low_parts], [status, model, preview, raw, history_table])
+                    with gr.Tab("Conversion"):
+                        convert_id = gr.Textbox(label="Original model task id")
+                        with gr.Row():
+                            fmt = gr.Dropdown(["GLTF", "USDZ", "FBX", "OBJ", "STL", "3MF"], value="GLTF", label="Format")
+                            conv_face = gr.Slider(500, 20000, value=20000, step=1, label="Face limit")
+                        with gr.Row():
+                            conv_quad = gr.Checkbox(label="Quad mesh")
+                            flatten = gr.Checkbox(label="Flatten bottom")
+                            pivot = gr.Checkbox(label="Pivot center bottom")
+                        with gr.Row():
+                            threshold = gr.Number(value=0.01, label="Flatten threshold")
+                            scale = gr.Number(value=1, label="Scale factor")
+                        with gr.Row():
+                            preset = gr.Dropdown(["blender", "mixamo", "3dsmax"], value="blender", label="FBX preset")
+                            orient = gr.Dropdown(["+x", "+y", "-x", "-y"], value="+x", label="Export orientation")
+                        run = gr.Button("Run convert_model", variant="primary")
+                        run.click(run_convert, [api_key, convert_id, fmt, conv_face, conv_quad, flatten, threshold, pivot, scale, preset, orient], [status, model, preview, raw, history_table])
 
-            with gr.Tab("Conversion"):
-                convert_id = gr.Textbox(label="Original model task id")
-                with gr.Row():
-                    fmt = gr.Dropdown(["GLTF", "USDZ", "FBX", "OBJ", "STL", "3MF"], value="GLTF", label="Format")
-                    conv_face = gr.Slider(500, 20000, value=20000, step=1, label="Face limit")
-                with gr.Row():
-                    conv_quad = gr.Checkbox(label="Quad mesh")
-                    flatten = gr.Checkbox(label="Flatten bottom")
-                    pivot = gr.Checkbox(label="Pivot center bottom")
-                with gr.Row():
-                    threshold = gr.Number(value=0.01, label="Flatten threshold")
-                    scale = gr.Number(value=1, label="Scale factor")
-                with gr.Row():
-                    preset = gr.Dropdown(["blender", "mixamo", "3dsmax"], value="blender", label="FBX preset")
-                    orient = gr.Dropdown(["+x", "+y", "-x", "-y"], value="+x", label="Export orientation")
-                run = gr.Button("Run convert_model", variant="primary")
-                run.click(run_convert, [api_key, convert_id, fmt, conv_face, conv_quad, flatten, threshold, pivot, scale, preset, orient], [status, model, preview, raw, history_table])
-
-            with gr.Tab("History"):
-                refresh_id = gr.Textbox(label="Task id")
-                refresh = gr.Button("Refresh task")
-                refresh.click(refresh_task, [api_key, refresh_id], [status, model, preview, raw, history_table])
-                reload_history = gr.Button("Reload history")
-                reload_history.click(render_history, None, history_table)
+                    with gr.Tab("History"):
+                        refresh_id = gr.Textbox(label="Task id")
+                        refresh = gr.Button("Refresh task")
+                        refresh.click(refresh_task, [api_key, refresh_id], [status, model, preview, raw, history_table])
+                        reload_history = gr.Button("Reload history")
+                        reload_history.click(render_history, None, history_table)
 
     return app
 

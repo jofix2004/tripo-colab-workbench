@@ -1,29 +1,22 @@
 # Tripo API Workbench - Colab
 
-Chay trong Google Colab:
+Notebook `TripoAPI_Colab.ipynb` gom 2 cell:
 
 ```python
 !pip -q install gradio requests
-!python /content/TripoAPI/colab/tripo_colab.py
 ```
-
-Neu muon share moi notebook:
-
-1. Upload `colab/tripo_colab.py` len GitHub public repo.
-2. Lay raw URL dang:
-
-```text
-https://raw.githubusercontent.com/jofix2004/tripo-colab-workbench/master/tripo_colab.py
-```
-
-3. Trong notebook, them truoc cell chay app:
 
 ```python
-import os
-os.environ["TRIPO_COLAB_RAW_URL"] = "https://raw.githubusercontent.com/jofix2004/tripo-colab-workbench/master/tripo_colab.py"
+from pathlib import Path
+import requests
+
+url = "https://raw.githubusercontent.com/jofix2004/tripo-colab-workbench/master/tripo_colab.py"
+script = Path("/content/tripo_colab.py")
+script.write_text(requests.get(url, timeout=60).text, encoding="utf-8")
+exec(script.read_text(encoding="utf-8"), globals())
 ```
 
-Notebook se tu tai script ve `/content/tripo_colab.py`.
+Share notebook la du.
 
 Mac dinh history/cache nam o:
 
@@ -31,13 +24,11 @@ Mac dinh history/cache nam o:
 /content/tripo_colab
 ```
 
-Muon luu vao Drive:
+Muon luu vao Drive thi set bien nay truoc khi chay app:
 
 ```python
 from google.colab import drive
-drive.mount('/content/drive')
+drive.mount("/content/drive")
 import os
 os.environ["TRIPO_COLAB_HOME"] = "/content/drive/MyDrive/TripoAPI"
 ```
-
-Sau do chay lai app.
