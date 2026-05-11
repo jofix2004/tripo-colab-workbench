@@ -707,7 +707,7 @@ def render_history():
     return rows
 
 
-def render_history_rows():
+def render_history_cards():
     records = history_records()
     items = []
     for task in records[:80]:
@@ -716,19 +716,27 @@ def render_history_rows():
             preview_path = ""
         if not preview_path:
             continue
+        title = short_id(task.get("task_id", ""))
+        status = task.get("status", "")
+        progress = task.get("progress", 0)
+        credits = task.get("consumed_credit", 0)
+        task_type = task.get("type", "")
+        html = f"""
+<div style="display:flex;flex-direction:column;gap:6px;padding:8px;border:1px solid #d9dde5;border-radius:8px;background:#fff;height:100%;">
+  <img src="{preview_path}" style="width:100%;height:96px;object-fit:cover;border-radius:6px;" />
+  <div style="font-size:12px;line-height:1.2;font-weight:600;word-break:break-word;">{title}</div>
+  <div style="font-size:11px;line-height:1.2;color:#555;">{task_type}</div>
+  <div style="font-size:11px;line-height:1.2;color:#555;">{status} · {progress}% · {credits} cr</div>
+</div>
+"""
         items.append([
-            preview_path,
-            task.get("type", ""),
-            task.get("status", ""),
-            f"{task.get('progress', 0)}%",
-            task.get("consumed_credit", 0),
-            task.get("task_id", ""),
+            html,
         ])
     return items
 
 
-def refresh_history_rows():
-    return gr.update(value=render_history_rows())
+def refresh_history_cards():
+    return gr.update(samples=render_history_cards())
 
 
 def history_records():
@@ -795,7 +803,9 @@ def build_app():
     #preview-model { min-height: 760px !important; }
     #preview-image { min-height: 220px !important; }
     #raw-json pre, #raw-json textarea { max-height: 180px !important; font-size: 11px !important; }
-    #history-table { max-height: 460px !important; overflow:auto !important; }
+    #history-cards { max-height: 560px !important; overflow:auto !important; }
+    #history-cards .gallery, #history-cards .grid-wrap { grid-template-columns: repeat(4, minmax(0, 1fr)) !important; }
+    #history-cards button { padding: 4px !important; }
     """
     with gr.Blocks(title="Tripo API Workbench Colab", css=css) as app:
         gr.Markdown("## Tripo API Workbench - Colab\nTexture/PBR off by default. History/cache in `/content/tripo_colab` unless `TRIPO_COLAB_HOME` is set.")
@@ -897,16 +907,17 @@ def build_app():
                         run.click(run_convert, [api_key, convert_id, fmt, conv_face, conv_quad, flatten, threshold, pivot, scale, preset, orient], [estimate_box, status, model, preview, raw])
 
                     with gr.Tab("History"):
-                        history_list = gr.Dataframe(
-                            headers=["Preview", "Type", "Status", "Progress", "Credits", "Task ID"],
-                            value=render_history_rows(),
+                        history_list = gr.Dataset(
+                            components=[gr.HTML(label="Card")],
+                            samples=render_history_cards(),
                             label="History",
-                            interactive=False,
-                            elem_id="history-table",
+                            layout="gallery",
+                            samples_per_page=80,
+                            elem_id="history-cards",
                         )
                         history_list.select(load_history_item, None, [estimate_box, status, model, preview, raw])
                         reload_history = gr.Button("Reload history")
-                        reload_history.click(refresh_history_rows, None, history_list)
+                        reload_history.click(refresh_history_cards, None, history_list)
 
     return app.queue()
 
