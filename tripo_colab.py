@@ -618,9 +618,9 @@ def render_history():
 
 
 def render_history_gallery():
-    store = read_store()
+    records = history_records()
     items = []
-    for task in store.get("tasks", [])[:80]:
+    for task in records[:80]:
         preview_path = task.get("cached_preview_path") or task.get("preview_url") or ""
         if preview_path.startswith("/") and not Path(preview_path).exists():
             preview_path = ""
@@ -636,6 +636,51 @@ def render_history_gallery():
     return items
 
 
+def history_records():
+    store = read_store()
+    records = []
+    for task in store.get("tasks", [])[:100]:
+        preview_path = task.get("cached_preview_path") or task.get("preview_url") or ""
+        if preview_path.startswith("/") and not Path(preview_path).exists():
+            preview_path = ""
+        if not preview_path:
+            continue
+        task = dict(task)
+        task["resolved_preview"] = preview_path
+        records.append(task)
+    return records
+
+
+def load_history_item(evt: gr.SelectData):
+    records = history_records()
+    idx = getattr(evt, "index", None)
+    if isinstance(idx, tuple):
+        idx = idx[0]
+    if idx is None or idx >= len(records):
+        raise gr.Error("Invalid history item")
+    task = records[idx]
+    model_path = task.get("cached_model_path") or None
+    if not model_path and task.get("model_url"):
+        model_path = cache_url(task.get("model_url"), "model", task.get("task_id", ""))
+    preview_path = task.get("resolved_preview") or None
+    if not preview_path and task.get("preview_url"):
+        preview_path = cache_url(task.get("preview_url"), "preview", task.get("task_id", ""))
+    record = {
+        "task_id": task.get("task_id", ""),
+        "type": task.get("type", ""),
+        "status": task.get("status", ""),
+        "progress": task.get("progress", 0),
+        "consumed_credit": task.get("consumed_credit", 0),
+        "model_url": task.get("model_url", ""),
+        "preview_url": task.get("preview_url", ""),
+    }
+    estimate = f"est. {task.get('consumed_credit', 0)} credits"
+    model_out = str(model_path) if model_path and Path(str(model_path)).suffix.lower() in {".glb", ".gltf", ".obj", ".stl"} else None
+    preview_out = str(preview_path) if preview_path else None
+    raw = json.dumps(task.get("last_response") or task, indent=2, ensure_ascii=False)
+    return estimate, render_status(record, estimate=estimate), model_out, preview_out, raw
+
+
 def split_csv(value):
     return [item.strip() for item in str(value or "").split(",") if item.strip()]
 
@@ -648,7 +693,7 @@ def build_app():
     #preview-model { min-height: 760px !important; }
     #preview-image { min-height: 220px !important; }
     #raw-json pre, #raw-json textarea { max-height: 180px !important; font-size: 11px !important; }
-    #history-gallery { min-height: 320px !important; }
+    #history-gallery { min-height: 280px !important; }
     """
     with gr.Blocks(title="Tripo API Workbench Colab", css=css) as app:
         gr.Markdown("## Tripo API Workbench - Colab\nTexture/PBR off by default. History/cache in `/content/tripo_colab` unless `TRIPO_COLAB_HOME` is set.")
@@ -662,18 +707,18 @@ def build_app():
                 api_key = gr.Textbox(label="API key", type="password", placeholder="tsk_...")
                 estimate_box = gr.Textbox(label="Cost estimate", value="est. ? credits", interactive=False)
                 status = gr.Textbox(label="Task status", lines=8)
+                with gr.Accordion("History", open=False):
+                    history_gallery = gr.Gallery(
+                        label="History preview",
+                        value=render_history_gallery(),
+                        columns=5,
+                        height=260,
+                        elem_id="history-gallery",
+                    )
+                    history_gallery.select(load_history_item, None, [estimate_box, status, model, preview, raw])
+                    reload_history = gr.Button("Reload history")
+                    reload_history.click(render_history_gallery, None, history_gallery)
                 with gr.Tabs():
-                    with gr.Tab("History"):
-                        history_gallery = gr.Gallery(
-                            label="History preview",
-                            value=render_history_gallery(),
-                            columns=2,
-                            height=420,
-                            elem_id="history-gallery",
-                        )
-                        reload_history = gr.Button("Reload history")
-                        reload_history.click(render_history_gallery, None, history_gallery)
-
                     with gr.Tab("Image to model"):
                         image = gr.File(label="Image", file_types=["image"])
                         with gr.Row():
@@ -759,6 +804,9 @@ def build_app():
                             comp.change(estimate_convert_ui, [conv_face, conv_quad, flatten, threshold, pivot, scale], [estimate_box])
                         run = gr.Button("Run convert_model", variant="primary")
                         run.click(run_convert, [api_key, convert_id, fmt, conv_face, conv_quad, flatten, threshold, pivot, scale, preset, orient], [estimate_box, status, model, preview, raw, history_gallery])
+
+                    with gr.Tab("History"):
+                        gr.Markdown("History list in accordion above.")
 
     return app.queue()
 
