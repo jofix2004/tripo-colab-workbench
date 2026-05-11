@@ -205,15 +205,16 @@ def stream_until_done(api_key, task_id, payload=None, max_wait=900):
             break
         time.sleep(2)
     record = normalize_task(last)
-    model_path, preview_path = cache_task_assets(record)
-    record["cached_model_path"] = str(model_path) if model_path else ""
+    preview_path = cache_task_preview(record)
+    model_path = None
+    record["cached_model_path"] = ""
     record["cached_preview_path"] = str(preview_path) if preview_path else ""
     upsert_task(record)
     estimate = estimate_credits(payload or record.get("request") or {}, record)
     yield (
         estimate,
         render_status(record, estimate=estimate, elapsed=time.time() - start),
-        str(model_path) if model_path and model_path.suffix.lower() in {".glb", ".gltf", ".obj", ".stl"} else None,
+        None,
         str(preview_path) if preview_path else None,
         json.dumps(record.get("last_response") or record, indent=2, ensure_ascii=False),
     )
@@ -342,9 +343,13 @@ def file_type(path):
 
 
 def cache_task_assets(record):
-    model_path = cache_url(record.get("model_url"), "model", record.get("task_id"))
     preview_path = cache_url(record.get("preview_url"), "preview", record.get("task_id"))
+    model_path = cache_url(record.get("model_url"), "model", record.get("task_id"))
     return model_path, preview_path
+
+
+def cache_task_preview(record):
+    return cache_url(record.get("preview_url"), "preview", record.get("task_id"))
 
 
 def cache_url(url, kind, task_id=""):
@@ -580,22 +585,33 @@ def estimate_credits(payload, record=None):
 
 
 def render_status(record, estimate=None, elapsed=None):
+    model_link = markdown_link("model", record.get("model_url", ""))
+    preview_link = markdown_link("preview", record.get("preview_url", ""))
     lines = [
-        f"task_id: {record.get('task_id', '-')}",
-        f"type: {record.get('type', '-')}",
-        f"status: {record.get('status', '-')}",
-        f"progress: {record.get('progress', 0)}%",
-        f"credits: {record.get('consumed_credit', 0)}",
+        f"**task:** `{short_id(record.get('task_id', '-'))}`",
+        f"**type:** `{record.get('type', '-')}`",
+        f"**status:** `{record.get('status', '-')}` · **progress:** `{record.get('progress', 0)}%`",
+        f"**credits:** `{record.get('consumed_credit', 0)}`",
     ]
     if estimate:
-        lines.append(f"estimate: {estimate}")
+        lines.append(f"**estimate:** `{estimate}`")
     if elapsed is not None:
-        lines.append(f"elapsed: {int(elapsed)}s")
-    lines.extend([
-        f"model: {record.get('model_url', '')}",
-        f"preview: {record.get('preview_url', '')}",
-    ])
-    return "\n".join(lines)
+        lines.append(f"**elapsed:** `{int(elapsed)}s`")
+    if model_link or preview_link:
+        lines.append("**links:** " + " · ".join(item for item in [model_link, preview_link] if item))
+    return "  \n".join(lines)
+
+
+def short_id(value):
+    value = str(value or "")
+    return value if len(value) <= 12 else f"{value[:8]}...{value[-4:]}"
+
+
+def markdown_link(label, url):
+    url = str(url or "")
+    if not url:
+        return ""
+    return f"[{label}]({url})"
 
 
 def render_history():
@@ -614,7 +630,7 @@ def render_history():
     return rows
 
 
-def render_history_samples():
+def render_history_rows():
     records = history_records()
     items = []
     for task in records[:80]:
@@ -623,18 +639,19 @@ def render_history_samples():
             preview_path = ""
         if not preview_path:
             continue
-        caption = (
-            f"{task.get('type', '-')}\n"
-            f"{task.get('status', '-')} | {task.get('progress', 0)}% | "
-            f"{task.get('consumed_credit', 0)} credits\n"
-            f"{task.get('task_id', '')}"
-        )
-        items.append([preview_path, caption])
+        items.append([
+            preview_path,
+            task.get("type", ""),
+            task.get("status", ""),
+            f"{task.get('progress', 0)}%",
+            task.get("consumed_credit", 0),
+            task.get("task_id", ""),
+        ])
     return items
 
 
-def refresh_history_samples():
-    return gr.update(samples=render_history_samples())
+def refresh_history_rows():
+    return gr.update(value=render_history_rows())
 
 
 def history_records():
@@ -652,9 +669,9 @@ def history_records():
     return records
 
 
-def load_history_item(index):
+def load_history_item(evt: gr.SelectData):
     records = history_records()
-    idx = index
+    idx = getattr(evt, "index", None)
     if isinstance(idx, (list, tuple)):
         idx = idx[0] if idx else None
     if isinstance(idx, str) and idx.isdigit():
@@ -696,8 +713,7 @@ def build_app():
     #preview-model { min-height: 760px !important; }
     #preview-image { min-height: 220px !important; }
     #raw-json pre, #raw-json textarea { max-height: 180px !important; font-size: 11px !important; }
-    #history-list { max-height: 460px !important; overflow:auto !important; }
-    #history-list img { max-width: 72px !important; max-height: 72px !important; object-fit: cover !important; }
+    #history-table { max-height: 460px !important; overflow:auto !important; }
     """
     with gr.Blocks(title="Tripo API Workbench Colab", css=css) as app:
         gr.Markdown("## Tripo API Workbench - Colab\nTexture/PBR off by default. History/cache in `/content/tripo_colab` unless `TRIPO_COLAB_HOME` is set.")
@@ -710,7 +726,7 @@ def build_app():
             with gr.Column(scale=2, min_width=520, elem_id="controls-col", elem_classes=["controls-col"]):
                 api_key = gr.Textbox(label="API key", type="password", placeholder="tsk_...")
                 estimate_box = gr.Textbox(label="Cost estimate", value="est. ? credits", interactive=False)
-                status = gr.Textbox(label="Task status", lines=8)
+                status = gr.Markdown(value="**Task status**")
                 with gr.Tabs():
                     with gr.Tab("Image to model"):
                         image = gr.File(label="Image", file_types=["image"])
@@ -799,19 +815,16 @@ def build_app():
                         run.click(run_convert, [api_key, convert_id, fmt, conv_face, conv_quad, flatten, threshold, pivot, scale, preset, orient], [estimate_box, status, model, preview, raw])
 
                     with gr.Tab("History"):
-                        history_list = gr.Dataset(
-                            components=[
-                                gr.Image(type="filepath", label="Preview", height=72, width=72),
-                                gr.Textbox(label="Task"),
-                            ],
-                            samples=render_history_samples(),
-                            type="index",
+                        history_list = gr.Dataframe(
+                            headers=["Preview", "Type", "Status", "Progress", "Credits", "Task ID"],
+                            value=render_history_rows(),
                             label="History",
-                            elem_id="history-list",
+                            interactive=False,
+                            elem_id="history-table",
                         )
-                        history_list.click(load_history_item, history_list, [estimate_box, status, model, preview, raw])
+                        history_list.select(load_history_item, None, [estimate_box, status, model, preview, raw])
                         reload_history = gr.Button("Reload history")
-                        reload_history.click(refresh_history_samples, None, history_list)
+                        reload_history.click(refresh_history_rows, None, history_list)
 
     return app.queue()
 
