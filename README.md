@@ -8,6 +8,10 @@ Notebook `TripoAPI_Colab.ipynb` gom 2 cell:
 
 ```python
 from pathlib import Path
+from google.colab import drive
+drive.mount("/content/drive")
+import os
+os.environ["TRIPO_COLAB_HOME"] = "/content/drive/MyDrive/TripoAPI"
 import requests
 
 url = "https://raw.githubusercontent.com/jofix2004/tripo-colab-workbench/master/tripo_colab.py"
@@ -18,17 +22,8 @@ exec(script.read_text(encoding="utf-8"), globals())
 
 Share notebook la du.
 
-Mac dinh history/cache nam o:
+Mac dinh history/cache nam o Drive:
 
 ```text
-/content/tripo_colab
-```
-
-Muon luu vao Drive thi set bien nay truoc khi chay app:
-
-```python
-from google.colab import drive
-drive.mount("/content/drive")
-import os
-os.environ["TRIPO_COLAB_HOME"] = "/content/drive/MyDrive/TripoAPI"
+/content/drive/MyDrive/TripoAPI
 ```
