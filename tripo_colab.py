@@ -3,6 +3,7 @@ import hmac
 import json
 import mimetypes
 import os
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -19,11 +20,13 @@ STORE_FILE = DATA_DIR / "tripo-history.json"
 CACHE_DIR = DATA_DIR / "cache"
 MODEL_CACHE_DIR = CACHE_DIR / "models"
 PREVIEW_CACHE_DIR = CACHE_DIR / "previews"
+PROXY_CACHE_DIR = CACHE_DIR / "proxies"
 
 
 def ensure_dirs():
     MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     PREVIEW_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    PROXY_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     if not STORE_FILE.exists():
         write_store({"version": 1, "updated_at": now_iso(), "tasks": [], "cache": []})
 
@@ -206,15 +209,17 @@ def stream_until_done(api_key, task_id, payload=None, max_wait=900):
         time.sleep(2)
     record = normalize_task(last)
     preview_path = cache_task_preview(record)
-    model_path = None
+    model_path = proxy_model_path(record.get("task_id", "proxy"))
     record["cached_model_path"] = ""
+    record["model_cache_state"] = "loading" if record.get("model_url") else "proxy"
     record["cached_preview_path"] = str(preview_path) if preview_path else ""
     upsert_task(record)
+    start_model_cache_thread(record)
     estimate = estimate_credits(payload or record.get("request") or {}, record)
     yield (
         estimate,
         render_status(record, estimate=estimate, elapsed=time.time() - start),
-        None,
+        str(model_path),
         str(preview_path) if preview_path else None,
         json.dumps(record.get("last_response") or record, indent=2, ensure_ascii=False),
     )
@@ -350,6 +355,69 @@ def cache_task_assets(record):
 
 def cache_task_preview(record):
     return cache_url(record.get("preview_url"), "preview", record.get("task_id"))
+
+
+def cache_task_model_async(record):
+    if not record.get("model_url"):
+        return None
+    model_path = cache_url(record.get("model_url"), "model", record.get("task_id"))
+    if model_path:
+        store = read_store()
+        for item in store.get("tasks", []):
+            if item.get("task_id") == record.get("task_id"):
+                item["cached_model_path"] = str(model_path)
+                item["model_cache_state"] = "full"
+                item["updated_at"] = now_iso()
+                break
+        write_store(store)
+    return model_path
+
+
+def start_model_cache_thread(record):
+    if not record.get("model_url"):
+        return
+    store = read_store()
+    for item in store.get("tasks", []):
+        if item.get("task_id") == record.get("task_id"):
+            item["model_cache_state"] = "loading"
+            item["updated_at"] = now_iso()
+            break
+    write_store(store)
+    thread = threading.Thread(target=cache_task_model_async, args=(record,), daemon=True)
+    thread.start()
+
+
+def proxy_model_path(task_id):
+    task_id = short_id(task_id or "proxy")
+    path = PROXY_CACHE_DIR / f"{task_id}.obj"
+    if not path.exists():
+        path.write_text(
+            "\n".join([
+                "o proxy",
+                "v -0.5 -0.5 -0.5",
+                "v 0.5 -0.5 -0.5",
+                "v 0.5 0.5 -0.5",
+                "v -0.5 0.5 -0.5",
+                "v -0.5 -0.5 0.5",
+                "v 0.5 -0.5 0.5",
+                "v 0.5 0.5 0.5",
+                "v -0.5 0.5 0.5",
+                "f 1 2 3",
+                "f 1 3 4",
+                "f 5 8 7",
+                "f 5 7 6",
+                "f 1 5 6",
+                "f 1 6 2",
+                "f 2 6 7",
+                "f 2 7 3",
+                "f 3 7 8",
+                "f 3 8 4",
+                "f 5 1 4",
+                "f 5 4 8",
+            ]),
+            encoding="utf-8",
+        )
+    return path
 
 
 def cache_url(url, kind, task_id=""):
@@ -587,11 +655,20 @@ def estimate_credits(payload, record=None):
 def render_status(record, estimate=None, elapsed=None):
     model_link = markdown_link("model", record.get("model_url", ""))
     preview_link = markdown_link("preview", record.get("preview_url", ""))
+    cached_model = record.get("cached_model_path") or ""
+    cache_state = record.get("model_cache_state") or ("full" if cached_model else "proxy")
+    if cache_state == "full":
+        mode = "full model loaded"
+    elif cache_state == "loading":
+        mode = "proxy 3D loaded · full model loading in background"
+    else:
+        mode = "proxy 3D loaded"
     lines = [
         f"**task:** `{short_id(record.get('task_id', '-'))}`",
         f"**type:** `{record.get('type', '-')}`",
         f"**status:** `{record.get('status', '-')}` · **progress:** `{record.get('progress', 0)}%`",
         f"**credits:** `{record.get('consumed_credit', 0)}`",
+        f"**3D:** `{mode}`",
     ]
     if estimate:
         lines.append(f"**estimate:** `{estimate}`")
@@ -680,8 +757,11 @@ def load_history_item(evt: gr.SelectData):
         raise gr.Error("Invalid history item")
     task = records[idx]
     model_path = task.get("cached_model_path") or None
+    if model_path and not Path(str(model_path)).exists():
+        model_path = None
     if not model_path and task.get("model_url"):
-        model_path = cache_url(task.get("model_url"), "model", task.get("task_id", ""))
+        start_model_cache_thread(task)
+        model_path = proxy_model_path(task.get("task_id", "proxy"))
     preview_path = task.get("resolved_preview") or None
     if not preview_path and task.get("preview_url"):
         preview_path = cache_url(task.get("preview_url"), "preview", task.get("task_id", ""))
@@ -693,6 +773,8 @@ def load_history_item(evt: gr.SelectData):
         "consumed_credit": task.get("consumed_credit", 0),
         "model_url": task.get("model_url", ""),
         "preview_url": task.get("preview_url", ""),
+        "cached_model_path": str(model_path) if model_path and Path(str(model_path)).name != f"{short_id(task.get('task_id', 'proxy'))}.obj" else "",
+        "model_cache_state": "full" if task.get("cached_model_path") and Path(str(task.get("cached_model_path"))).exists() else ("loading" if task.get("model_url") else "proxy"),
     }
     estimate = f"est. {task.get('consumed_credit', 0)} credits"
     model_out = str(model_path) if model_path and Path(str(model_path)).suffix.lower() in {".glb", ".gltf", ".obj", ".stl"} else None
