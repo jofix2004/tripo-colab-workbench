@@ -19,18 +19,11 @@ STORE_FILE = DATA_DIR / "tripo-history.json"
 CACHE_DIR = DATA_DIR / "cache"
 MODEL_CACHE_DIR = CACHE_DIR / "models"
 PREVIEW_CACHE_DIR = CACHE_DIR / "previews"
-PROXY_CACHE_DIR = CACHE_DIR / "proxies"
-
-try:
-    import trimesh
-except Exception:
-    trimesh = None
 
 
 def ensure_dirs():
     MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     PREVIEW_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    PROXY_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     if not STORE_FILE.exists():
         write_store({"version": 1, "updated_at": now_iso(), "tasks": [], "cache": []})
 
@@ -194,7 +187,6 @@ def poll_until_done(api_key, task_id, max_wait=900):
 def stream_until_done(api_key, task_id, payload=None, max_wait=900):
     start = time.time()
     last = {}
-    model_path = None
     preview_path = None
     while time.time() - start <= max_wait:
         last = get_task(api_key, task_id)
@@ -204,7 +196,7 @@ def stream_until_done(api_key, task_id, payload=None, max_wait=900):
         yield (
             estimate,
             render_status(record, estimate=estimate, elapsed=time.time() - start),
-            str(model_path) if model_path and model_path.suffix.lower() in {".glb", ".gltf", ".obj", ".stl"} else None,
+            None,
             str(preview_path) if preview_path else None,
             json.dumps(record.get("last_response") or record, indent=2, ensure_ascii=False),
             None,
@@ -217,37 +209,21 @@ def stream_until_done(api_key, task_id, payload=None, max_wait=900):
     record = normalize_task(last)
     preview_path = cache_task_preview(record)
     full_model_path = cache_url(record.get("model_url"), "model", record.get("task_id"))
-    proxy_path = proxy_model_path(record.get("task_id", "proxy"), full_model_path)
-    record["cached_model_path"] = ""
-    record["model_cache_state"] = "proxy_ready" if full_model_path else "proxy"
+    record["cached_model_path"] = str(full_model_path) if full_model_path else ""
+    record["model_cache_state"] = "full" if full_model_path else "loading"
     record["cached_preview_path"] = str(preview_path) if preview_path else ""
     upsert_task(record)
     estimate = estimate_credits(payload or record.get("request") or {}, record)
     yield (
         estimate,
         render_status(record, estimate=estimate, elapsed=time.time() - start),
-        str(proxy_path) if proxy_path else None,
+        str(full_model_path) if full_model_path else None,
         str(preview_path) if preview_path else None,
         json.dumps(record.get("last_response") or record, indent=2, ensure_ascii=False),
         str(full_model_path) if full_model_path else None,
         str(preview_path) if preview_path else None,
         str(full_model_path) if full_model_path else None,
     )
-    if full_model_path:
-        time.sleep(3)
-        record["cached_model_path"] = str(full_model_path)
-        record["model_cache_state"] = "full"
-        upsert_task(record)
-        yield (
-            estimate,
-            render_status(record, estimate=estimate, elapsed=time.time() - start),
-            str(full_model_path) if full_model_path.suffix.lower() in {".glb", ".gltf", ".obj", ".stl"} else str(proxy_path),
-            str(preview_path) if preview_path else None,
-            json.dumps(record.get("last_response") or record, indent=2, ensure_ascii=False),
-            str(full_model_path),
-            str(preview_path) if preview_path else None,
-            str(full_model_path),
-        )
 
 
 def upload_image(api_key, path):
@@ -380,59 +356,6 @@ def cache_task_assets(record):
 
 def cache_task_preview(record):
     return cache_url(record.get("preview_url"), "preview", record.get("task_id"))
-
-
-def proxy_model_path(task_id, full_model_path=None):
-    task_id = short_id(task_id or "proxy")
-    path = PROXY_CACHE_DIR / f"{task_id}.obj"
-    if not path.exists():
-        if full_model_path and trimesh is not None:
-            try:
-                loaded = trimesh.load(str(full_model_path), force="scene", process=False)
-                if hasattr(loaded, "dump"):
-                    meshes = [m for m in loaded.dump() if hasattr(m, "vertices") and len(m.vertices)]
-                    mesh = trimesh.util.concatenate(meshes) if meshes else None
-                else:
-                    mesh = loaded
-                if mesh is not None and hasattr(mesh, "bounding_box_oriented"):
-                    proxy = mesh.bounding_box_oriented.to_mesh()
-                    proxy.export(path)
-                    return path
-            except Exception:
-                pass
-        fallback_proxy(path)
-    return path
-
-
-def fallback_proxy(path):
-    path = Path(path)
-    path.write_text(
-        "\n".join([
-            "o proxy",
-            "v -0.5 -0.5 -0.5",
-            "v 0.5 -0.5 -0.5",
-            "v 0.5 0.5 -0.5",
-            "v -0.5 0.5 -0.5",
-            "v -0.5 -0.5 0.5",
-            "v 0.5 -0.5 0.5",
-            "v 0.5 0.5 0.5",
-            "v -0.5 0.5 0.5",
-            "f 1 2 3",
-            "f 1 3 4",
-            "f 5 8 7",
-            "f 5 7 6",
-            "f 1 5 6",
-            "f 1 6 2",
-            "f 2 6 7",
-            "f 2 7 3",
-            "f 3 7 8",
-            "f 3 8 4",
-            "f 5 1 4",
-            "f 5 4 8",
-        ]),
-        encoding="utf-8",
-    )
-    return path
 
 
 def cache_url(url, kind, task_id=""):
@@ -671,15 +594,13 @@ def render_status(record, estimate=None, elapsed=None):
     model_link = markdown_link("model", record.get("model_url", ""))
     preview_link = markdown_link("preview", record.get("preview_url", ""))
     cached_model = record.get("cached_model_path") or ""
-    cache_state = record.get("model_cache_state") or ("full" if cached_model else "proxy")
+    cache_state = record.get("model_cache_state") or ("full" if cached_model else "loading")
     if cache_state == "full":
         mode = "full model loaded"
-    elif cache_state == "proxy_ready":
-        mode = "proxy 3D loaded | full model ready"
     elif cache_state == "loading":
-        mode = "proxy 3D loaded | waiting for full model"
+        mode = "waiting for full model"
     else:
-        mode = "proxy 3D loaded"
+        mode = "not available"
     lines = [
         f"**task:** `{short_id(record.get('task_id', '-'))}`",
         f"**type:** `{record.get('type', '-')}`",
@@ -803,7 +724,6 @@ def load_history_item(evt: gr.SelectData):
         full_model_path = None
     if not full_model_path and task.get("model_url"):
         full_model_path = cache_url(task.get("model_url"), "model", task.get("task_id", ""))
-    model_path = proxy_model_path(task.get("task_id", "proxy"), full_model_path)
     preview_path = task.get("resolved_preview") or None
     if not preview_path and task.get("preview_url"):
         preview_path = cache_url(task.get("preview_url"), "preview", task.get("task_id", ""))
@@ -816,14 +736,14 @@ def load_history_item(evt: gr.SelectData):
         "model_url": task.get("model_url", ""),
         "preview_url": task.get("preview_url", ""),
         "cached_model_path": str(full_model_path) if full_model_path else "",
-        "model_cache_state": "proxy_ready" if full_model_path else "proxy",
+        "model_cache_state": "full" if full_model_path else "loading",
     }
     estimate = f"est. {task.get('consumed_credit', 0)} credits"
-    model_out = str(model_path) if model_path and Path(str(model_path)).suffix.lower() in {".glb", ".gltf", ".obj", ".stl"} else None
+    model_out = str(full_model_path) if full_model_path and Path(str(full_model_path)).suffix.lower() in {".glb", ".gltf", ".obj", ".stl"} else None
     preview_out = str(preview_path) if preview_path else None
     raw = json.dumps(task.get("last_response") or task, indent=2, ensure_ascii=False)
     selected = f"Selected: `{short_id(task.get('task_id', ''))}`"
-    return estimate, render_status(record, estimate=estimate), model_out, preview_out, raw, selected, str(full_model_path) if full_model_path else model_out, preview_out, str(full_model_path) if full_model_path else None
+    return estimate, render_status(record, estimate=estimate), model_out, preview_out, raw, selected, str(full_model_path) if full_model_path else None, preview_out, str(full_model_path) if full_model_path else None
 
 
 def load_full_model(full_model_path):
