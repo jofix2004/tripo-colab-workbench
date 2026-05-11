@@ -3,7 +3,7 @@
 Notebook `TripoAPI_Colab.ipynb` gom 2 cell:
 
 ```python
-!pip -q install gradio requests
+!pip -q install gradio requests trimesh
 ```
 
 ```python

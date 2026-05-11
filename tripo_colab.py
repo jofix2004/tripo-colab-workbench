@@ -3,7 +3,6 @@ import hmac
 import json
 import mimetypes
 import os
-import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -21,6 +20,11 @@ CACHE_DIR = DATA_DIR / "cache"
 MODEL_CACHE_DIR = CACHE_DIR / "models"
 PREVIEW_CACHE_DIR = CACHE_DIR / "previews"
 PROXY_CACHE_DIR = CACHE_DIR / "proxies"
+
+try:
+    import trimesh
+except Exception:
+    trimesh = None
 
 
 def ensure_dirs():
@@ -203,26 +207,43 @@ def stream_until_done(api_key, task_id, payload=None, max_wait=900):
             str(model_path) if model_path and model_path.suffix.lower() in {".glb", ".gltf", ".obj", ".stl"} else None,
             str(preview_path) if preview_path else None,
             json.dumps(record.get("last_response") or record, indent=2, ensure_ascii=False),
+            None,
+            None,
         )
         if status in FINAL_STATUSES:
             break
         time.sleep(2)
     record = normalize_task(last)
     preview_path = cache_task_preview(record)
-    model_path = proxy_model_path(record.get("task_id", "proxy"))
+    full_model_path = cache_url(record.get("model_url"), "model", record.get("task_id"))
+    proxy_path = proxy_model_path(record.get("task_id", "proxy"), full_model_path)
     record["cached_model_path"] = ""
-    record["model_cache_state"] = "loading" if record.get("model_url") else "proxy"
+    record["model_cache_state"] = "proxy_ready" if full_model_path else "proxy"
     record["cached_preview_path"] = str(preview_path) if preview_path else ""
     upsert_task(record)
-    start_model_cache_thread(record)
     estimate = estimate_credits(payload or record.get("request") or {}, record)
     yield (
         estimate,
         render_status(record, estimate=estimate, elapsed=time.time() - start),
-        str(model_path),
+        str(proxy_path) if proxy_path else None,
         str(preview_path) if preview_path else None,
         json.dumps(record.get("last_response") or record, indent=2, ensure_ascii=False),
+        str(full_model_path) if full_model_path else None,
+        str(preview_path) if preview_path else None,
     )
+    if full_model_path:
+        record["cached_model_path"] = str(full_model_path)
+        record["model_cache_state"] = "full"
+        upsert_task(record)
+        yield (
+            estimate,
+            render_status(record, estimate=estimate, elapsed=time.time() - start),
+            str(full_model_path) if full_model_path.suffix.lower() in {".glb", ".gltf", ".obj", ".stl"} else str(proxy_path),
+            str(preview_path) if preview_path else None,
+            json.dumps(record.get("last_response") or record, indent=2, ensure_ascii=False),
+            str(full_model_path),
+            str(preview_path) if preview_path else None,
+        )
 
 
 def upload_image(api_key, path):
@@ -357,67 +378,66 @@ def cache_task_preview(record):
     return cache_url(record.get("preview_url"), "preview", record.get("task_id"))
 
 
-def cache_task_model_async(record):
-    if not record.get("model_url"):
-        return None
-    model_path = cache_url(record.get("model_url"), "model", record.get("task_id"))
-    if model_path:
-        store = read_store()
-        for item in store.get("tasks", []):
-            if item.get("task_id") == record.get("task_id"):
-                item["cached_model_path"] = str(model_path)
-                item["model_cache_state"] = "full"
-                item["updated_at"] = now_iso()
-                break
-        write_store(store)
-    return model_path
-
-
-def start_model_cache_thread(record):
-    if not record.get("model_url"):
-        return
-    store = read_store()
-    for item in store.get("tasks", []):
-        if item.get("task_id") == record.get("task_id"):
-            item["model_cache_state"] = "loading"
-            item["updated_at"] = now_iso()
-            break
-    write_store(store)
-    thread = threading.Thread(target=cache_task_model_async, args=(record,), daemon=True)
-    thread.start()
-
-
-def proxy_model_path(task_id):
+def proxy_model_path(task_id, full_model_path=None):
     task_id = short_id(task_id or "proxy")
-    path = PROXY_CACHE_DIR / f"{task_id}.obj"
+    path = PROXY_CACHE_DIR / f"{task_id}.glb"
     if not path.exists():
-        path.write_text(
-            "\n".join([
-                "o proxy",
-                "v -0.5 -0.5 -0.5",
-                "v 0.5 -0.5 -0.5",
-                "v 0.5 0.5 -0.5",
-                "v -0.5 0.5 -0.5",
-                "v -0.5 -0.5 0.5",
-                "v 0.5 -0.5 0.5",
-                "v 0.5 0.5 0.5",
-                "v -0.5 0.5 0.5",
-                "f 1 2 3",
-                "f 1 3 4",
-                "f 5 8 7",
-                "f 5 7 6",
-                "f 1 5 6",
-                "f 1 6 2",
-                "f 2 6 7",
-                "f 2 7 3",
-                "f 3 7 8",
-                "f 3 8 4",
-                "f 5 1 4",
-                "f 5 4 8",
-            ]),
-            encoding="utf-8",
-        )
+        if full_model_path and trimesh is not None:
+            try:
+                loaded = trimesh.load(str(full_model_path), force="scene", process=False)
+                if hasattr(loaded, "dump"):
+                    meshes = [m for m in loaded.dump() if hasattr(m, "vertices") and len(m.vertices)]
+                    mesh = trimesh.util.concatenate(meshes) if meshes else None
+                else:
+                    mesh = loaded
+                if mesh is not None and hasattr(mesh, "bounding_box_oriented"):
+                    proxy = mesh.bounding_box_oriented.to_mesh()
+                    proxy.export(path)
+                    return path
+            except Exception:
+                pass
+        fallback_proxy(path)
     return path
+
+
+def fallback_proxy(path):
+    path = Path(path)
+    obj_path = path.with_suffix(".obj")
+    obj_path.write_text(
+        "\n".join([
+            "o proxy",
+            "v -0.5 -0.5 -0.5",
+            "v 0.5 -0.5 -0.5",
+            "v 0.5 0.5 -0.5",
+            "v -0.5 0.5 -0.5",
+            "v -0.5 -0.5 0.5",
+            "v 0.5 -0.5 0.5",
+            "v 0.5 0.5 0.5",
+            "v -0.5 0.5 0.5",
+            "f 1 2 3",
+            "f 1 3 4",
+            "f 5 8 7",
+            "f 5 7 6",
+            "f 1 5 6",
+            "f 1 6 2",
+            "f 2 6 7",
+            "f 2 7 3",
+            "f 3 7 8",
+            "f 3 8 4",
+            "f 5 1 4",
+            "f 5 4 8",
+        ]),
+        encoding="utf-8",
+    )
+    if trimesh is not None:
+        try:
+            mesh = trimesh.load(str(obj_path), force="mesh", process=False)
+            mesh.export(path)
+            obj_path.unlink(missing_ok=True)
+            return path
+        except Exception:
+            pass
+    return obj_path
 
 
 def cache_url(url, kind, task_id=""):
@@ -659,14 +679,16 @@ def render_status(record, estimate=None, elapsed=None):
     cache_state = record.get("model_cache_state") or ("full" if cached_model else "proxy")
     if cache_state == "full":
         mode = "full model loaded"
+    elif cache_state == "proxy_ready":
+        mode = "proxy 3D loaded | full model ready"
     elif cache_state == "loading":
-        mode = "proxy 3D loaded · full model loading in background"
+        mode = "proxy 3D loaded | waiting for full model"
     else:
         mode = "proxy 3D loaded"
     lines = [
         f"**task:** `{short_id(record.get('task_id', '-'))}`",
         f"**type:** `{record.get('type', '-')}`",
-        f"**status:** `{record.get('status', '-')}` · **progress:** `{record.get('progress', 0)}%`",
+        f"**status:** `{record.get('status', '-')}` | **progress:** `{record.get('progress', 0)}%`",
         f"**credits:** `{record.get('consumed_credit', 0)}`",
         f"**3D:** `{mode}`",
     ]
@@ -675,7 +697,7 @@ def render_status(record, estimate=None, elapsed=None):
     if elapsed is not None:
         lines.append(f"**elapsed:** `{int(elapsed)}s`")
     if model_link or preview_link:
-        lines.append("**links:** " + " · ".join(item for item in [model_link, preview_link] if item))
+        lines.append("**links:** " + " | ".join(item for item in [model_link, preview_link] if item))
     return "  \n".join(lines)
 
 
@@ -721,22 +743,39 @@ def render_history_cards():
         progress = task.get("progress", 0)
         credits = task.get("consumed_credit", 0)
         task_type = task.get("type", "")
+        thumb = image_src(preview_path)
         html = f"""
 <div style="display:flex;flex-direction:column;gap:6px;padding:8px;border:1px solid #d9dde5;border-radius:8px;background:#fff;height:100%;">
-  <img src="{preview_path}" style="width:100%;height:96px;object-fit:cover;border-radius:6px;" />
+  <img src="{thumb}" style="width:100%;height:96px;object-fit:cover;border-radius:6px;" />
   <div style="font-size:12px;line-height:1.2;font-weight:600;word-break:break-word;">{title}</div>
   <div style="font-size:11px;line-height:1.2;color:#555;">{task_type}</div>
-  <div style="font-size:11px;line-height:1.2;color:#555;">{status} · {progress}% · {credits} cr</div>
+  <div style="font-size:11px;line-height:1.2;color:#555;">{status} | {progress}% | {credits} cr</div>
 </div>
 """
-        items.append([
-            html,
-        ])
+        items.append([html])
     return items
 
 
 def refresh_history_cards():
     return gr.update(samples=render_history_cards())
+
+
+def image_src(path):
+    path = str(path or "")
+    if not path:
+        return ""
+    if path.startswith("http"):
+        return path
+    p = Path(path)
+    if not p.exists():
+        return ""
+    mime = "image/webp" if p.suffix.lower() == ".webp" else "image/png"
+    try:
+        import base64
+        data = base64.b64encode(p.read_bytes()).decode("ascii")
+        return f"data:{mime};base64,{data}"
+    except Exception:
+        return path
 
 
 def history_records():
@@ -764,12 +803,12 @@ def load_history_item(evt: gr.SelectData):
     if idx is None or idx >= len(records):
         raise gr.Error("Invalid history item")
     task = records[idx]
-    model_path = task.get("cached_model_path") or None
-    if model_path and not Path(str(model_path)).exists():
-        model_path = None
-    if not model_path and task.get("model_url"):
-        start_model_cache_thread(task)
-        model_path = proxy_model_path(task.get("task_id", "proxy"))
+    full_model_path = task.get("cached_model_path") or None
+    if full_model_path and not Path(str(full_model_path)).exists():
+        full_model_path = None
+    if not full_model_path and task.get("model_url"):
+        full_model_path = cache_url(task.get("model_url"), "model", task.get("task_id", ""))
+    model_path = proxy_model_path(task.get("task_id", "proxy"), full_model_path)
     preview_path = task.get("resolved_preview") or None
     if not preview_path and task.get("preview_url"):
         preview_path = cache_url(task.get("preview_url"), "preview", task.get("task_id", ""))
@@ -781,14 +820,15 @@ def load_history_item(evt: gr.SelectData):
         "consumed_credit": task.get("consumed_credit", 0),
         "model_url": task.get("model_url", ""),
         "preview_url": task.get("preview_url", ""),
-        "cached_model_path": str(model_path) if model_path and Path(str(model_path)).name != f"{short_id(task.get('task_id', 'proxy'))}.obj" else "",
-        "model_cache_state": "full" if task.get("cached_model_path") and Path(str(task.get("cached_model_path"))).exists() else ("loading" if task.get("model_url") else "proxy"),
+        "cached_model_path": str(full_model_path) if full_model_path else "",
+        "model_cache_state": "proxy_ready" if full_model_path else "proxy",
     }
     estimate = f"est. {task.get('consumed_credit', 0)} credits"
     model_out = str(model_path) if model_path and Path(str(model_path)).suffix.lower() in {".glb", ".gltf", ".obj", ".stl"} else None
     preview_out = str(preview_path) if preview_path else None
     raw = json.dumps(task.get("last_response") or task, indent=2, ensure_ascii=False)
-    return estimate, render_status(record, estimate=estimate), model_out, preview_out, raw
+    selected = f"Selected: `{short_id(task.get('task_id', ''))}`"
+    return estimate, render_status(record, estimate=estimate), model_out, preview_out, raw, selected, str(full_model_path) if full_model_path else model_out, preview_out
 
 
 def split_csv(value):
@@ -813,6 +853,9 @@ def build_app():
             with gr.Column(scale=3, min_width=620, elem_id="preview-col", elem_classes=["preview-col"]):
                 model = gr.Model3D(label="3D preview", elem_id="preview-model")
                 preview = gr.Image(label="Preview image", type="filepath", elem_id="preview-image")
+                with gr.Row():
+                    download_model = gr.DownloadButton("Download model", value=None, size="sm")
+                    download_preview = gr.DownloadButton("Download preview", value=None, size="sm")
                 with gr.Accordion("Raw task JSON", open=False):
                     raw = gr.Code(label="Raw task JSON", language="json", elem_id="raw-json")
             with gr.Column(scale=2, min_width=520, elem_id="controls-col", elem_classes=["controls-col"]):
@@ -839,7 +882,7 @@ def build_app():
                                 [estimate_box],
                             )
                         run = gr.Button("Run image_to_model", variant="primary")
-                        run.click(run_image_to_model, [api_key, image, version, face, autofix, smart, quad, geo, seed], [estimate_box, status, model, preview, raw])
+                        run.click(run_image_to_model, [api_key, image, version, face, autofix, smart, quad, geo, seed], [estimate_box, status, model, preview, raw, download_model, download_preview])
 
                     with gr.Tab("Multiview to model"):
                         original = gr.Textbox(label="Original multiview task id")
@@ -865,12 +908,12 @@ def build_app():
                                 [estimate_box],
                             )
                         run = gr.Button("Run multiview_to_model", variant="primary")
-                        run.click(run_multiview_to_model, [api_key, original, front, left, back, right, mv_version, mv_face, mv_autofix, mv_smart, mv_quad, mv_geo, mv_seed], [estimate_box, status, model, preview, raw])
+                        run.click(run_multiview_to_model, [api_key, original, front, left, back, right, mv_version, mv_face, mv_autofix, mv_smart, mv_quad, mv_geo, mv_seed], [estimate_box, status, model, preview, raw, download_model, download_preview])
 
                     with gr.Tab("Import model"):
                         model_file = gr.File(label="Model", file_types=[".glb", ".obj", ".fbx", ".stl"])
                         run = gr.Button("Run import_model", variant="primary")
-                        run.click(run_import_model, [api_key, model_file], [estimate_box, status, model, preview, raw])
+                        run.click(run_import_model, [api_key, model_file], [estimate_box, status, model, preview, raw, download_model, download_preview])
 
                     with gr.Tab("Smart low poly"):
                         low_id = gr.Textbox(label="Original model task id")
@@ -884,7 +927,7 @@ def build_app():
                         for comp in [low_face, low_quad]:
                             comp.change(estimate_lowpoly_ui, [low_face, low_quad], [estimate_box])
                         run = gr.Button("Run smart low poly", variant="primary")
-                        run.click(run_lowpoly, [api_key, low_id, low_version, low_face, low_quad, low_bake, low_parts], [estimate_box, status, model, preview, raw])
+                        run.click(run_lowpoly, [api_key, low_id, low_version, low_face, low_quad, low_bake, low_parts], [estimate_box, status, model, preview, raw, download_model, download_preview])
 
                     with gr.Tab("Conversion"):
                         convert_id = gr.Textbox(label="Original model task id")
@@ -904,9 +947,10 @@ def build_app():
                         for comp in [conv_face, conv_quad, flatten, threshold, pivot, scale]:
                             comp.change(estimate_convert_ui, [conv_face, conv_quad, flatten, threshold, pivot, scale], [estimate_box])
                         run = gr.Button("Run convert_model", variant="primary")
-                        run.click(run_convert, [api_key, convert_id, fmt, conv_face, conv_quad, flatten, threshold, pivot, scale, preset, orient], [estimate_box, status, model, preview, raw])
+                        run.click(run_convert, [api_key, convert_id, fmt, conv_face, conv_quad, flatten, threshold, pivot, scale, preset, orient], [estimate_box, status, model, preview, raw, download_model, download_preview])
 
                     with gr.Tab("History"):
+                        selected_box = gr.Markdown(value="**Selected:** none")
                         history_list = gr.Dataset(
                             components=[gr.HTML(label="Card")],
                             samples=render_history_cards(),
@@ -915,7 +959,7 @@ def build_app():
                             samples_per_page=80,
                             elem_id="history-cards",
                         )
-                        history_list.select(load_history_item, None, [estimate_box, status, model, preview, raw])
+                        history_list.select(load_history_item, None, [estimate_box, status, model, preview, raw, selected_box, download_model, download_preview])
                         reload_history = gr.Button("Reload history")
                         reload_history.click(refresh_history_cards, None, history_list)
 
