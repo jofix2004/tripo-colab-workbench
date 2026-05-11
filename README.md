@@ -13,14 +13,14 @@ Neu muon share moi notebook:
 2. Lay raw URL dang:
 
 ```text
-https://raw.githubusercontent.com/<user>/<repo>/<branch>/colab/tripo_colab.py
+https://raw.githubusercontent.com/jofix2004/tripo-colab-workbench/master/tripo_colab.py
 ```
 
 3. Trong notebook, them truoc cell chay app:
 
 ```python
 import os
-os.environ["TRIPO_COLAB_RAW_URL"] = "https://raw.githubusercontent.com/<user>/<repo>/<branch>/colab/tripo_colab.py"
+os.environ["TRIPO_COLAB_RAW_URL"] = "https://raw.githubusercontent.com/jofix2004/tripo-colab-workbench/master/tripo_colab.py"
 ```
 
 Notebook se tu tai script ve `/content/tripo_colab.py`.
