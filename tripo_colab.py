@@ -209,6 +209,7 @@ def stream_until_done(api_key, task_id, payload=None, max_wait=900):
             json.dumps(record.get("last_response") or record, indent=2, ensure_ascii=False),
             None,
             None,
+            None,
         )
         if status in FINAL_STATUSES:
             break
@@ -230,6 +231,7 @@ def stream_until_done(api_key, task_id, payload=None, max_wait=900):
         json.dumps(record.get("last_response") or record, indent=2, ensure_ascii=False),
         str(full_model_path) if full_model_path else None,
         str(preview_path) if preview_path else None,
+        str(full_model_path) if full_model_path else None,
     )
     if full_model_path:
         time.sleep(3)
@@ -244,6 +246,7 @@ def stream_until_done(api_key, task_id, payload=None, max_wait=900):
             json.dumps(record.get("last_response") or record, indent=2, ensure_ascii=False),
             str(full_model_path),
             str(preview_path) if preview_path else None,
+            str(full_model_path),
         )
 
 
@@ -820,7 +823,18 @@ def load_history_item(evt: gr.SelectData):
     preview_out = str(preview_path) if preview_path else None
     raw = json.dumps(task.get("last_response") or task, indent=2, ensure_ascii=False)
     selected = f"Selected: `{short_id(task.get('task_id', ''))}`"
-    return estimate, render_status(record, estimate=estimate), model_out, preview_out, raw, selected, str(full_model_path) if full_model_path else model_out, preview_out
+    return estimate, render_status(record, estimate=estimate), model_out, preview_out, raw, selected, str(full_model_path) if full_model_path else model_out, preview_out, str(full_model_path) if full_model_path else None
+
+
+def load_full_model(full_model_path):
+    if not full_model_path:
+        raise gr.Error("Full model not cached yet")
+    path = Path(str(full_model_path))
+    if not path.exists():
+        raise gr.Error("Full model file missing")
+    if path.suffix.lower() not in {".glb", ".gltf", ".obj", ".stl"}:
+        raise gr.Error(f"Viewer cannot load {path.suffix}; download file instead")
+    return str(path), f"**3D:** `full model loaded`"
 
 
 def split_csv(value):
@@ -846,14 +860,17 @@ def build_app():
                 model = gr.Model3D(label="3D preview", elem_id="preview-model")
                 preview = gr.Image(label="Preview image", type="filepath", elem_id="preview-image")
                 with gr.Row():
+                    current_full = gr.State(None)
                     download_model = gr.DownloadButton("Download model", value=None, size="sm")
                     download_preview = gr.DownloadButton("Download preview", value=None, size="sm")
+                    load_full = gr.Button("Load full model", size="sm")
                 with gr.Accordion("Raw task JSON", open=False):
                     raw = gr.Code(label="Raw task JSON", language="json", elem_id="raw-json")
             with gr.Column(scale=2, min_width=520, elem_id="controls-col", elem_classes=["controls-col"]):
                 api_key = gr.Textbox(label="API key", type="password", placeholder="tsk_...")
                 estimate_box = gr.Textbox(label="Cost estimate", value="est. ? credits", interactive=False)
                 status = gr.Markdown(value="**Task status**")
+                load_full.click(load_full_model, current_full, [model, status])
                 with gr.Tabs():
                     with gr.Tab("Image to model"):
                         image = gr.File(label="Image", file_types=["image"])
@@ -874,7 +891,7 @@ def build_app():
                                 [estimate_box],
                             )
                         run = gr.Button("Run image_to_model", variant="primary")
-                        run.click(run_image_to_model, [api_key, image, version, face, autofix, smart, quad, geo, seed], [estimate_box, status, model, preview, raw, download_model, download_preview])
+                        run.click(run_image_to_model, [api_key, image, version, face, autofix, smart, quad, geo, seed], [estimate_box, status, model, preview, raw, download_model, download_preview, current_full])
 
                     with gr.Tab("Multiview to model"):
                         original = gr.Textbox(label="Original multiview task id")
@@ -900,12 +917,12 @@ def build_app():
                                 [estimate_box],
                             )
                         run = gr.Button("Run multiview_to_model", variant="primary")
-                        run.click(run_multiview_to_model, [api_key, original, front, left, back, right, mv_version, mv_face, mv_autofix, mv_smart, mv_quad, mv_geo, mv_seed], [estimate_box, status, model, preview, raw, download_model, download_preview])
+                        run.click(run_multiview_to_model, [api_key, original, front, left, back, right, mv_version, mv_face, mv_autofix, mv_smart, mv_quad, mv_geo, mv_seed], [estimate_box, status, model, preview, raw, download_model, download_preview, current_full])
 
                     with gr.Tab("Import model"):
                         model_file = gr.File(label="Model", file_types=[".glb", ".obj", ".fbx", ".stl"])
                         run = gr.Button("Run import_model", variant="primary")
-                        run.click(run_import_model, [api_key, model_file], [estimate_box, status, model, preview, raw, download_model, download_preview])
+                        run.click(run_import_model, [api_key, model_file], [estimate_box, status, model, preview, raw, download_model, download_preview, current_full])
 
                     with gr.Tab("Smart low poly"):
                         low_id = gr.Textbox(label="Original model task id")
@@ -919,7 +936,7 @@ def build_app():
                         for comp in [low_face, low_quad]:
                             comp.change(estimate_lowpoly_ui, [low_face, low_quad], [estimate_box])
                         run = gr.Button("Run smart low poly", variant="primary")
-                        run.click(run_lowpoly, [api_key, low_id, low_version, low_face, low_quad, low_bake, low_parts], [estimate_box, status, model, preview, raw, download_model, download_preview])
+                        run.click(run_lowpoly, [api_key, low_id, low_version, low_face, low_quad, low_bake, low_parts], [estimate_box, status, model, preview, raw, download_model, download_preview, current_full])
 
                     with gr.Tab("Conversion"):
                         convert_id = gr.Textbox(label="Original model task id")
@@ -939,7 +956,7 @@ def build_app():
                         for comp in [conv_face, conv_quad, flatten, threshold, pivot, scale]:
                             comp.change(estimate_convert_ui, [conv_face, conv_quad, flatten, threshold, pivot, scale], [estimate_box])
                         run = gr.Button("Run convert_model", variant="primary")
-                        run.click(run_convert, [api_key, convert_id, fmt, conv_face, conv_quad, flatten, threshold, pivot, scale, preset, orient], [estimate_box, status, model, preview, raw, download_model, download_preview])
+                        run.click(run_convert, [api_key, convert_id, fmt, conv_face, conv_quad, flatten, threshold, pivot, scale, preset, orient], [estimate_box, status, model, preview, raw, download_model, download_preview, current_full])
 
                     with gr.Tab("History"):
                         selected_box = gr.Markdown(value="**Selected:** none")
@@ -951,7 +968,7 @@ def build_app():
                             samples_per_page=80,
                             elem_id="history-cards",
                         )
-                        history_list.select(load_history_item, None, [estimate_box, status, model, preview, raw, selected_box, download_model, download_preview])
+                        history_list.select(load_history_item, None, [estimate_box, status, model, preview, raw, selected_box, download_model, download_preview, current_full])
                         reload_history = gr.Button("Reload history")
                         reload_history.click(refresh_history_cards, None, history_list)
 
