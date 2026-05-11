@@ -805,9 +805,6 @@ def build_app():
                         run = gr.Button("Run convert_model", variant="primary")
                         run.click(run_convert, [api_key, convert_id, fmt, conv_face, conv_quad, flatten, threshold, pivot, scale, preset, orient], [estimate_box, status, model, preview, raw, history_gallery])
 
-                    with gr.Tab("History"):
-                        gr.Markdown("History list in accordion above.")
-
     return app.queue()
 
 
