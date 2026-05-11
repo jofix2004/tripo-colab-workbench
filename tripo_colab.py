@@ -185,6 +185,43 @@ def poll_until_done(api_key, task_id, max_wait=900):
     return record, model_path, preview_path
 
 
+def stream_until_done(api_key, task_id, payload=None, max_wait=900):
+    start = time.time()
+    last = {}
+    model_path = None
+    preview_path = None
+    while time.time() - start <= max_wait:
+        last = get_task(api_key, task_id)
+        record = normalize_task(last)
+        status = str(record.get("status", "")).lower()
+        estimate = estimate_credits(payload or record.get("request") or {}, record)
+        yield (
+            estimate,
+            render_status(record, estimate=estimate, elapsed=time.time() - start),
+            str(model_path) if model_path and model_path.suffix.lower() in {".glb", ".gltf", ".obj", ".stl"} else None,
+            str(preview_path) if preview_path else None,
+            json.dumps(record.get("last_response") or record, indent=2, ensure_ascii=False),
+            render_history_gallery(),
+        )
+        if status in FINAL_STATUSES:
+            break
+        time.sleep(2)
+    record = normalize_task(last)
+    model_path, preview_path = cache_task_assets(record)
+    record["cached_model_path"] = str(model_path) if model_path else ""
+    record["cached_preview_path"] = str(preview_path) if preview_path else ""
+    upsert_task(record)
+    estimate = estimate_credits(payload or record.get("request") or {}, record)
+    yield (
+        estimate,
+        render_status(record, estimate=estimate, elapsed=time.time() - start),
+        str(model_path) if model_path and model_path.suffix.lower() in {".glb", ".gltf", ".obj", ".stl"} else None,
+        str(preview_path) if preview_path else None,
+        json.dumps(record.get("last_response") or record, indent=2, ensure_ascii=False),
+        render_history_gallery(),
+    )
+
+
 def upload_image(api_key, path):
     api_key = require_key(api_key)
     path = normalize_upload_path(path)
@@ -465,29 +502,103 @@ def run_convert(api_key, original_task_id, fmt, face_limit, quad, flatten_bottom
 
 def run_and_render(api_key, payload):
     task_id = post_task(api_key, payload)
-    record, model_path, preview_path = poll_until_done(api_key, task_id)
-    status = render_status(record)
-    model = str(model_path) if model_path and model_path.suffix.lower() in {".glb", ".gltf", ".obj", ".stl"} else None
-    preview = str(preview_path) if preview_path else None
-    raw = json.dumps(record.get("last_response") or record, indent=2, ensure_ascii=False)
-    return status, model, preview, raw, render_history()
+    yield from stream_until_done(api_key, task_id, payload)
 
 
-def refresh_task(api_key, task_id):
-    record, model_path, preview_path = poll_until_done(api_key, task_id, max_wait=5)
-    return render_status(record), str(model_path) if model_path else None, str(preview_path) if preview_path else None, json.dumps(record, indent=2, ensure_ascii=False), render_history()
+def estimate_generation_ui(version, face_limit, smart, quad, geometry_quality):
+    payload = generation_payload("image_to_model", version, face_limit, smart, quad, geometry_quality, None)
+    return estimate_credits(payload)
 
 
-def render_status(record):
-    return (
-        f"task_id: {record.get('task_id', '-')}\n"
-        f"type: {record.get('type', '-')}\n"
-        f"status: {record.get('status', '-')}\n"
-        f"progress: {record.get('progress', 0)}\n"
-        f"credits: {record.get('consumed_credit', 0)}\n"
-        f"model: {record.get('model_url', '')}\n"
-        f"preview: {record.get('preview_url', '')}"
-    )
+def estimate_lowpoly_ui(face_limit, quad):
+    payload = {"type": "highpoly_to_lowpoly"}
+    if face_limit not in (None, ""):
+        payload["face_limit"] = int(face_limit)
+    if quad:
+        payload["quad"] = True
+    return estimate_credits(payload)
+
+
+def estimate_convert_ui(face_limit, quad, flatten_bottom, flatten_threshold, pivot, scale_factor):
+    payload = {"type": "convert_model"}
+    if face_limit not in (None, ""):
+        payload["face_limit"] = int(face_limit)
+    if quad:
+        payload["quad"] = True
+    if flatten_bottom:
+        payload["flatten_bottom"] = True
+    if flatten_threshold not in (None, "", 0.01):
+        payload["flatten_bottom_threshold"] = float(flatten_threshold)
+    if pivot:
+        payload["pivot_to_center_bottom"] = True
+    if scale_factor not in (None, "", 1):
+        payload["scale_factor"] = float(scale_factor)
+    return estimate_credits(payload)
+
+
+def estimate_credits(payload, record=None):
+    payload = payload or {}
+    task_type = payload.get("type") or (record or {}).get("type") or ""
+    version = str(payload.get("model_version") or "")
+    if task_type == "convert_model":
+        total = 5
+        if payload.get("quad"):
+            total += 5
+        if payload.get("face_limit") not in (None, ""):
+            total += 5
+        if payload.get("flatten_bottom"):
+            total += 5
+        if payload.get("flatten_bottom_threshold") not in (None, ""):
+            total += 5
+        if payload.get("texture_size") not in (None, ""):
+            total += 5
+        if payload.get("texture_format") not in (None, ""):
+            total += 5
+        if payload.get("pivot_to_center_bottom"):
+            total += 5
+        if payload.get("scale_factor") not in (None, "", 1):
+            total += 5
+        return f"est. {total} credits"
+    if task_type == "highpoly_to_lowpoly":
+        total = 20
+        if payload.get("quad"):
+            total += 5
+        if payload.get("face_limit") not in (None, ""):
+            total += 5
+        return f"est. {total} credits"
+    if task_type in {"image_to_model", "multiview_to_model"}:
+        total = 40 if version == "P1-20260311" else 30
+        if payload.get("texture") is False:
+            total -= 10
+        if payload.get("smart_low_poly"):
+            total += 10
+        if payload.get("quad"):
+            total += 5
+        if payload.get("geometry_quality") == "detailed":
+            total += 20
+        return f"est. {max(total, 0)} credits"
+    if task_type == "import_model":
+        return "est. 0 credits"
+    return "est. ? credits"
+
+
+def render_status(record, estimate=None, elapsed=None):
+    lines = [
+        f"task_id: {record.get('task_id', '-')}",
+        f"type: {record.get('type', '-')}",
+        f"status: {record.get('status', '-')}",
+        f"progress: {record.get('progress', 0)}%",
+        f"credits: {record.get('consumed_credit', 0)}",
+    ]
+    if estimate:
+        lines.append(f"estimate: {estimate}")
+    if elapsed is not None:
+        lines.append(f"elapsed: {int(elapsed)}s")
+    lines.extend([
+        f"model: {record.get('model_url', '')}",
+        f"preview: {record.get('preview_url', '')}",
+    ])
+    return "\n".join(lines)
 
 
 def render_history():
@@ -506,6 +617,25 @@ def render_history():
     return rows
 
 
+def render_history_gallery():
+    store = read_store()
+    items = []
+    for task in store.get("tasks", [])[:80]:
+        preview_path = task.get("cached_preview_path") or task.get("preview_url") or ""
+        if preview_path.startswith("/") and not Path(preview_path).exists():
+            preview_path = ""
+        if not preview_path:
+            continue
+        caption = (
+            f"{task.get('type', '-')}\n"
+            f"{task.get('status', '-')} | {task.get('progress', 0)}% | "
+            f"{task.get('consumed_credit', 0)} credits\n"
+            f"{task.get('task_id', '')}"
+        )
+        items.append((preview_path, caption))
+    return items
+
+
 def split_csv(value):
     return [item.strip() for item in str(value or "").split(",") if item.strip()]
 
@@ -515,10 +645,10 @@ def build_app():
     css = """
     .preview-col { order: 2; }
     .controls-col { order: 1; }
-    #preview-model { min-height: 720px !important; }
+    #preview-model { min-height: 760px !important; }
     #preview-image { min-height: 220px !important; }
     #raw-json pre, #raw-json textarea { max-height: 180px !important; font-size: 11px !important; }
-    #history-box table { font-size: 11px !important; }
+    #history-gallery { min-height: 320px !important; }
     """
     with gr.Blocks(title="Tripo API Workbench Colab", css=css) as app:
         gr.Markdown("## Tripo API Workbench - Colab\nTexture/PBR off by default. History/cache in `/content/tripo_colab` unless `TRIPO_COLAB_HOME` is set.")
@@ -528,17 +658,22 @@ def build_app():
                 preview = gr.Image(label="Preview image", type="filepath", elem_id="preview-image")
                 with gr.Accordion("Raw task JSON", open=False):
                     raw = gr.Code(label="Raw task JSON", language="json", elem_id="raw-json")
-                with gr.Accordion("History", open=False):
-                    history_table = gr.Dataframe(
-                        headers=["task_id", "type", "status", "progress", "credits", "model_url", "cached_model_path"],
-                        value=render_history(),
-                        label="History",
-                        elem_id="history-box",
-                    )
             with gr.Column(scale=2, min_width=520, elem_id="controls-col", elem_classes=["controls-col"]):
                 api_key = gr.Textbox(label="API key", type="password", placeholder="tsk_...")
+                estimate_box = gr.Textbox(label="Cost estimate", value="est. ? credits", interactive=False)
                 status = gr.Textbox(label="Task status", lines=8)
                 with gr.Tabs():
+                    with gr.Tab("History"):
+                        history_gallery = gr.Gallery(
+                            label="History preview",
+                            value=render_history_gallery(),
+                            columns=2,
+                            height=420,
+                            elem_id="history-gallery",
+                        )
+                        reload_history = gr.Button("Reload history")
+                        reload_history.click(render_history_gallery, None, history_gallery)
+
                     with gr.Tab("Image to model"):
                         image = gr.File(label="Image", file_types=["image"])
                         with gr.Row():
@@ -551,8 +686,14 @@ def build_app():
                         with gr.Row():
                             geo = gr.Dropdown(["standard", "detailed"], value="standard", label="Geometry quality")
                             seed = gr.Number(label="Model seed", precision=0)
+                        for comp in [version, face, smart, quad, geo]:
+                            comp.change(
+                                estimate_generation_ui,
+                                [version, face, smart, quad, geo],
+                                [estimate_box],
+                            )
                         run = gr.Button("Run image_to_model", variant="primary")
-                        run.click(run_image_to_model, [api_key, image, version, face, autofix, smart, quad, geo, seed], [status, model, preview, raw, history_table])
+                        run.click(run_image_to_model, [api_key, image, version, face, autofix, smart, quad, geo, seed], [estimate_box, status, model, preview, raw, history_gallery])
 
                     with gr.Tab("Multiview to model"):
                         original = gr.Textbox(label="Original multiview task id")
@@ -571,13 +712,19 @@ def build_app():
                         with gr.Row():
                             mv_geo = gr.Dropdown(["standard", "detailed"], value="standard", label="Geometry quality")
                             mv_seed = gr.Number(label="Model seed", precision=0)
+                        for comp in [mv_version, mv_face, mv_smart, mv_quad, mv_geo]:
+                            comp.change(
+                                estimate_generation_ui,
+                                [mv_version, mv_face, mv_smart, mv_quad, mv_geo],
+                                [estimate_box],
+                            )
                         run = gr.Button("Run multiview_to_model", variant="primary")
-                        run.click(run_multiview_to_model, [api_key, original, front, left, back, right, mv_version, mv_face, mv_autofix, mv_smart, mv_quad, mv_geo, mv_seed], [status, model, preview, raw, history_table])
+                        run.click(run_multiview_to_model, [api_key, original, front, left, back, right, mv_version, mv_face, mv_autofix, mv_smart, mv_quad, mv_geo, mv_seed], [estimate_box, status, model, preview, raw, history_gallery])
 
                     with gr.Tab("Import model"):
                         model_file = gr.File(label="Model", file_types=[".glb", ".obj", ".fbx", ".stl"])
                         run = gr.Button("Run import_model", variant="primary")
-                        run.click(run_import_model, [api_key, model_file], [status, model, preview, raw, history_table])
+                        run.click(run_import_model, [api_key, model_file], [estimate_box, status, model, preview, raw, history_gallery])
 
                     with gr.Tab("Smart low poly"):
                         low_id = gr.Textbox(label="Original model task id")
@@ -588,8 +735,10 @@ def build_app():
                             low_quad = gr.Checkbox(label="Quad mesh")
                             low_bake = gr.Checkbox(label="Bake", value=True)
                         low_parts = gr.Textbox(label="Part names")
+                        for comp in [low_face, low_quad]:
+                            comp.change(estimate_lowpoly_ui, [low_face, low_quad], [estimate_box])
                         run = gr.Button("Run smart low poly", variant="primary")
-                        run.click(run_lowpoly, [api_key, low_id, low_version, low_face, low_quad, low_bake, low_parts], [status, model, preview, raw, history_table])
+                        run.click(run_lowpoly, [api_key, low_id, low_version, low_face, low_quad, low_bake, low_parts], [estimate_box, status, model, preview, raw, history_gallery])
 
                     with gr.Tab("Conversion"):
                         convert_id = gr.Textbox(label="Original model task id")
@@ -606,17 +755,12 @@ def build_app():
                         with gr.Row():
                             preset = gr.Dropdown(["blender", "mixamo", "3dsmax"], value="blender", label="FBX preset")
                             orient = gr.Dropdown(["+x", "+y", "-x", "-y"], value="+x", label="Export orientation")
+                        for comp in [conv_face, conv_quad, flatten, threshold, pivot, scale]:
+                            comp.change(estimate_convert_ui, [conv_face, conv_quad, flatten, threshold, pivot, scale], [estimate_box])
                         run = gr.Button("Run convert_model", variant="primary")
-                        run.click(run_convert, [api_key, convert_id, fmt, conv_face, conv_quad, flatten, threshold, pivot, scale, preset, orient], [status, model, preview, raw, history_table])
+                        run.click(run_convert, [api_key, convert_id, fmt, conv_face, conv_quad, flatten, threshold, pivot, scale, preset, orient], [estimate_box, status, model, preview, raw, history_gallery])
 
-                    with gr.Tab("History"):
-                        refresh_id = gr.Textbox(label="Task id")
-                        refresh = gr.Button("Refresh task")
-                        refresh.click(refresh_task, [api_key, refresh_id], [status, model, preview, raw, history_table])
-                        reload_history = gr.Button("Reload history")
-                        reload_history.click(render_history, None, history_table)
-
-    return app
+    return app.queue()
 
 
 if __name__ == "__main__":
